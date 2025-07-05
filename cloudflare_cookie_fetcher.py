@@ -215,8 +215,111 @@ class CloudflareCookieFetcher:
             self.logger.error(f"❌ Failed to navigate to Cloudflare: {str(e)}")
             raise
     
+    def simulate_human_mouse_movement(self, page: Page, target_x: int, target_y: int) -> None:
+        """Simulate human-like mouse movement to target coordinates."""
+        try:
+            import random
+            import math
+            
+            # Get current mouse position (start from a random position)
+            current_x = random.randint(100, 400)
+            current_y = random.randint(100, 300)
+            
+            # Calculate distance and steps
+            distance = math.sqrt((target_x - current_x) ** 2 + (target_y - current_y) ** 2)
+            steps = max(10, int(distance / 20))  # More steps for longer distances
+            
+            # Move mouse in curved path with random variations
+            for i in range(steps):
+                progress = i / steps
+                
+                # Add some curve to the movement
+                curve_offset = math.sin(progress * math.pi) * random.uniform(-20, 20)
+                
+                # Calculate intermediate position with curve
+                intermediate_x = current_x + (target_x - current_x) * progress + curve_offset
+                intermediate_y = current_y + (target_y - current_y) * progress
+                
+                # Add small random variations
+                intermediate_x += random.uniform(-3, 3)
+                intermediate_y += random.uniform(-3, 3)
+                
+                # Move mouse to intermediate position
+                page.mouse.move(intermediate_x, intermediate_y)
+                
+                # Random delay between movements
+                import time
+                time.sleep(random.uniform(0.01, 0.03))
+            
+            # Final precise movement to target
+            page.mouse.move(target_x, target_y)
+            
+        except Exception as e:
+            self.logger.debug(f"Mouse movement simulation failed: {str(e)}")
+            # Fallback to direct movement
+            page.mouse.move(target_x, target_y)
+    
+    def _try_hover_focus_click(self, element) -> None:
+        """Try hover, focus, and click sequence."""
+        element.hover()
+        self.humanized_wait(0.2, 0.5)
+        element.focus()
+        self.humanized_wait(0.1, 0.3)
+        element.click()
+    
+    def _try_coordinate_click(self, frame, element) -> None:
+        """Try clicking using exact coordinates."""
+        bbox = element.bounding_box()
+        if bbox:
+            import random
+            center_x = bbox['x'] + bbox['width'] / 2 + random.uniform(-2, 2)
+            center_y = bbox['y'] + bbox['height'] / 2 + random.uniform(-2, 2)
+            frame.mouse.click(center_x, center_y)
+    
+    def _check_challenge_progress(self, frame) -> bool:
+        """Check if challenge is progressing or completed."""
+        try:
+            # Look for success indicators
+            success_selectors = [
+                "#success",
+                ".success",
+                "text=Success",
+                "[data-testid='success']",
+                ".cf-turnstile-success",
+                ".check-mark",
+                "svg[class*='success']"
+            ]
+            
+            for selector in success_selectors:
+                try:
+                    if frame.locator(selector).count() > 0 and frame.locator(selector).is_visible():
+                        return True
+                except:
+                    continue
+            
+            # Check for any visual changes that indicate progress
+            try:
+                # Look for any checked checkboxes
+                checked_boxes = frame.locator("input[type='checkbox']:checked").count()
+                if checked_boxes > 0:
+                    return True
+                
+                # Look for loading or processing indicators
+                loading_indicators = frame.locator(".loading, .processing, .spinner").count()
+                if loading_indicators > 0:
+                    return True
+                    
+            except:
+                pass
+            
+            return False
+            
+        except Exception as e:
+            self.logger.debug(f"Challenge progress check failed: {str(e)}")
+            return False
+    
     def handle_cloudflare_challenge(self, page: Page) -> None:
-        """Handle Cloudflare challenge if present."""
+        """Handle Cloudflare challenge with advanced human-like behavior."""
         try:
             self.logger.info("🔍 Checking for Cloudflare challenge")
             
@@ -224,7 +327,227 @@ class CloudflareCookieFetcher:
             self.humanized_wait(3.0, 5.0)
             self.take_step_screenshot(page, "check_cloudflare_challenge")
             
-            # Check for common Cloudflare challenge indicators
+            # Check for Cloudflare iframe challenge first
+            iframe_selectors = [
+                "iframe[title='Widget containing a Cloudflare security challenge']",
+                "iframe[src*='challenges.cloudflare.com']",
+                "iframe[src*='cloudflare']",
+                "iframe[src*='turnstile']"
+            ]
+            
+            for iframe_selector in iframe_selectors:
+                try:
+                    iframe = page.locator(iframe_selector)
+                    if iframe.count() > 0 and iframe.is_visible():
+                        self.logger.info("🛡️ Cloudflare iframe challenge detected")
+                        self.take_step_screenshot(page, "cloudflare_iframe_detected")
+                        
+                        # Wait for iframe to fully load
+                        self.humanized_wait(2.0, 4.0)
+                        
+                        # Switch to iframe
+                        iframe_element = iframe.first
+                        frame = iframe_element.content_frame()
+                        
+                        if frame:
+                            self.logger.info("🔄 Switching to Cloudflare challenge iframe")
+                            
+                            # Wait for iframe content to load completely
+                            self.humanized_wait(3.0, 5.0)
+                            
+                            # Debug: Take screenshot of iframe content
+                            try:
+                                self.take_step_screenshot(page, "iframe_content_debug")
+                                
+                                # Get iframe HTML for debugging
+                                iframe_html = frame.evaluate("document.documentElement.outerHTML")
+                                self.logger.info(f"📋 Iframe HTML content (first 500 chars): {iframe_html[:500]}")
+                                
+                            except Exception as e:
+                                self.logger.debug(f"Debug info failed: {str(e)}")
+                            
+                            # Look for the checkbox with multiple strategies
+                            checkbox_selectors = [
+                                "//label[contains(@class, 'cb-lb')]/input[@type='checkbox']",
+                                "//label[contains(@class, 'cb-lb')]",
+                                "input[type='checkbox']",
+                                "label input[type='checkbox']",
+                                ".cb-lb input",
+                                ".cf-turnstile-wrapper input",
+                                "[data-testid='turnstile-checkbox']",
+                                "text=Verify you are human",
+                                "//span[text()='Verify you are human']",
+                                "*"  # Last resort - find all elements
+                            ]
+                            
+                            # First, let's see what elements exist in the iframe
+                            try:
+                                all_elements = frame.locator("*").all()
+                                self.logger.info(f"🔍 Found {len(all_elements)} total elements in iframe")
+                                
+                                # Check for any clickable elements
+                                clickable_elements = frame.locator("input, button, label, span, div").all()
+                                self.logger.info(f"🔍 Found {len(clickable_elements)} potentially clickable elements")
+                                
+                                for i, element in enumerate(clickable_elements[:10]):  # Check first 10
+                                    try:
+                                        tag_name = element.evaluate("el => el.tagName")
+                                        class_name = element.evaluate("el => el.className")
+                                        inner_text = element.evaluate("el => el.innerText")
+                                        self.logger.info(f"📝 Element {i}: {tag_name} class='{class_name}' text='{inner_text[:50]}'")
+                                    except:
+                                        pass
+                                        
+                            except Exception as e:
+                                self.logger.debug(f"Element enumeration failed: {str(e)}")
+                            
+                            checkbox_clicked = False
+                            found_element = None
+                            
+                            for checkbox_selector in checkbox_selectors:
+                                try:
+                                    self.logger.info(f"🔍 Trying selector: {checkbox_selector}")
+                                    
+                                    # Try to find the checkbox
+                                    if checkbox_selector == "*":
+                                        # Special case - try to click anything that looks like a checkbox area
+                                        elements = frame.locator("label, input, div, span").all()
+                                        for element in elements:
+                                            try:
+                                                text = element.evaluate("el => el.innerText || el.textContent || ''")
+                                                class_name = element.evaluate("el => el.className || ''")
+                                                if any(keyword in text.lower() for keyword in ["verify", "human", "not a robot"]) or \
+                                                   any(keyword in class_name.lower() for keyword in ["cb-", "checkbox", "turnstile"]):
+                                                    found_element = element
+                                                    self.logger.info(f"✅ Found potential checkbox element by content: {text[:50]} class: {class_name}")
+                                                    break
+                                            except:
+                                                continue
+                                    else:
+                                        checkbox = frame.locator(checkbox_selector)
+                                        if checkbox.count() > 0:
+                                            found_element = checkbox.first
+                                            self.logger.info(f"✅ Found element with selector: {checkbox_selector}")
+                                    
+                                    if found_element:
+                                        try:
+                                            # Wait for element to be ready
+                                            found_element.wait_for(state="visible", timeout=3000)
+                                            
+                                            if found_element.is_visible():
+                                                self.logger.info(f"✅ Element is visible, attempting interaction")
+                                                self.take_step_screenshot(page, f"checkbox_found_{checkbox_selector.replace('/', '_').replace('*', 'wildcard')}")
+                                                
+                                                # Try multiple click approaches
+                                                click_methods = [
+                                                    ("hover_focus_click", lambda: self._try_hover_focus_click(found_element)),
+                                                    ("force_click", lambda: found_element.click(force=True)),
+                                                    ("js_click", lambda: found_element.evaluate("el => el.click()")),
+                                                    ("dispatch_event", lambda: found_element.evaluate("""
+                                                        el => {
+                                                            el.dispatchEvent(new MouseEvent('mousedown', {bubbles: true}));
+                                                            el.dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
+                                                            el.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+                                                        }
+                                                    """)),
+                                                    ("coordinate_click", lambda: self._try_coordinate_click(frame, found_element))
+                                                ]
+                                                
+                                                for method_name, method_func in click_methods:
+                                                    try:
+                                                        self.logger.info(f"🖱️ Trying click method: {method_name}")
+                                                        method_func()
+                                                        self.humanized_wait(1.0, 2.0)
+                                                        self.take_step_screenshot(page, f"after_{method_name}")
+                                                        
+                                                        # Check if click was successful by looking for changes
+                                                        if self._check_challenge_progress(frame):
+                                                            self.logger.info(f"✅ Click successful with method: {method_name}")
+                                                            checkbox_clicked = True
+                                                            break
+                                                            
+                                                    except Exception as e:
+                                                        self.logger.debug(f"Click method {method_name} failed: {str(e)}")
+                                                        continue
+                                                
+                                                if checkbox_clicked:
+                                                    break
+                                                    
+                                        except Exception as e:
+                                            self.logger.debug(f"Element interaction failed: {str(e)}")
+                                            continue
+                                            
+                                except Exception as e:
+                                    self.logger.debug(f"Selector {checkbox_selector} failed: {str(e)}")
+                                    continue
+                            
+                            if not checkbox_clicked:
+                                self.logger.warning("⚠️ Could not find or click Cloudflare checkbox - trying generic iframe click")
+                                # Last resort - click center of iframe
+                                try:
+                                    iframe_bbox = iframe_element.bounding_box()
+                                    if iframe_bbox:
+                                        center_x = iframe_bbox['x'] + iframe_bbox['width'] / 2
+                                        center_y = iframe_bbox['y'] + iframe_bbox['height'] / 2
+                                        page.mouse.click(center_x, center_y)
+                                        self.logger.info("🖱️ Clicked center of iframe as fallback")
+                                        checkbox_clicked = True
+                                except Exception as e:
+                                    self.logger.error(f"Fallback iframe click failed: {str(e)}")
+                            
+                            if checkbox_clicked:
+                                # Wait for challenge processing
+                                self.logger.info("⏳ Waiting for Cloudflare challenge to process...")
+                                self.humanized_wait(3.0, 5.0)
+                                
+                                # Look for success indicators
+                                success_selectors = [
+                                    "#success",
+                                    ".success",
+                                    "text=Success",
+                                    "[data-testid='success']",
+                                    ".cf-turnstile-success"
+                                ]
+                                
+                                challenge_resolved = False
+                                
+                                # Check for success indicators
+                                for success_selector in success_selectors:
+                                    try:
+                                        success_element = frame.locator(success_selector)
+                                        if success_element.count() > 0 and success_element.is_visible():
+                                            self.logger.info(f"✅ Challenge success indicator found: {success_selector}")
+                                            challenge_resolved = True
+                                            break
+                                    except:
+                                        continue
+                                
+                                # If no success indicator, check if iframe disappeared
+                                if not challenge_resolved:
+                                    for _ in range(30):  # Check for 30 seconds
+                                        if not page.locator(iframe_selector).is_visible():
+                                            self.logger.info("✅ Cloudflare challenge resolved - iframe disappeared")
+                                            challenge_resolved = True
+                                            break
+                                        self.humanized_wait(1.0, 1.0)
+                                
+                                if challenge_resolved:
+                                    self.take_step_screenshot(page, "cloudflare_challenge_resolved")
+                                    self.logger.info("✅ Cloudflare challenge completed successfully")
+                                    return
+                                else:
+                                    self.logger.warning("⚠️ Challenge may still be processing")
+                                    self.take_step_screenshot(page, "cloudflare_challenge_processing")
+                                    return
+                            else:
+                                self.logger.warning("⚠️ Could not find Cloudflare checkbox in iframe")
+                        else:
+                            self.logger.warning("⚠️ Could not access iframe content")
+                except Exception as e:
+                    self.logger.debug(f"Iframe selector {iframe_selector} failed: {str(e)}")
+                    continue
+            
+            # Check for other common Cloudflare challenge indicators
             challenge_selectors = [
                 '[data-ray]',  # Cloudflare Ray ID
                 '.cf-browser-verification',
@@ -253,11 +576,11 @@ class CloudflareCookieFetcher:
             # Continue anyway as challenge might have resolved
     
     
-    def fill_login_credentials(self, page: Page, username: str, password: str) -> None:
-        """Fill login credentials without submitting the form."""
+    def perform_automatic_login(self, page: Page, username: str, password: str) -> None:
+        """Perform fully automated login with human-like behavior."""
         try:
-            self.logger.info("✏️ Filling login credentials")
-            self.take_step_screenshot(page, "before_filling_credentials")
+            self.logger.info("🔐 Starting automated login process")
+            self.take_step_screenshot(page, "before_login")
             
             # Look for login form
             login_selectors = [
@@ -282,6 +605,15 @@ class CloudflareCookieFetcher:
             # Fill email with humanized input
             self.logger.info("✏️ Filling email field")
             self.humanized_wait(1.0, 2.0)
+            
+            # Get email input position for human-like interaction
+            email_bbox = email_input.bounding_box()
+            if email_bbox:
+                import random
+                email_x = email_bbox['x'] + email_bbox['width'] / 2 + random.uniform(-10, 10)
+                email_y = email_bbox['y'] + email_bbox['height'] / 2 + random.uniform(-2, 2)
+                self.simulate_human_mouse_movement(page, email_x, email_y)
+            
             email_input.click()
             self.humanized_wait(0.5, 1.0)
             email_input.fill(username)
@@ -310,90 +642,35 @@ class CloudflareCookieFetcher:
             
             # Fill password with humanized input
             self.logger.info("✏️ Filling password field")
+            
+            # Get password input position for human-like interaction
+            password_bbox = password_input.bounding_box()
+            if password_bbox:
+                import random
+                password_x = password_bbox['x'] + password_bbox['width'] / 2 + random.uniform(-10, 10)
+                password_y = password_bbox['y'] + password_bbox['height'] / 2 + random.uniform(-2, 2)
+                self.simulate_human_mouse_movement(page, password_x, password_y)
+            
             password_input.click()
             self.humanized_wait(0.5, 1.0)
             password_input.fill(password)
             self.take_step_screenshot(page, "credentials_filled")
             self.humanized_wait(1.0, 2.0)
             
+            # Handle any verification challenges before submitting
+            self.logger.info("🔍 Checking for verification challenges before login")
+            self.handle_cloudflare_challenge(page)
             
-            self.logger.info("✅ Credentials filled successfully - ready for manual login")
-            self.take_step_screenshot(page, "ready_for_manual_login")
-            
-        except Exception as e:
-            self.logger.error(f"❌ Failed to fill credentials: {str(e)}")
-            raise
-    
-    def perform_login(self, page: Page, username: str, password: str) -> None:
-        """Perform login to Cloudflare with humanized flow."""
-        try:
-            self.logger.info("🔐 Attempting to login to Cloudflare")
-            self.take_step_screenshot(page, "login_page_loaded")
-            
-            # Check if already logged in
-            if page.locator('[data-testid="user-menu-button"]').is_visible():
-                self.logger.info("✅ Already logged in to Cloudflare")
-                return
-            
-            # Look for login form
-            login_selectors = [
-                'input[type="email"]',
-                'input[name="email"]',
-                '#email'
-            ]
-            
-            email_input = None
-            for selector in login_selectors:
-                if page.locator(selector).is_visible():
-                    email_input = page.locator(selector)
-                    break
-            
-            if not email_input:
-                self.logger.error("Could not find email input field")
-                raise Exception("Email input field not found")
-            
-            # Fill login form with humanized input
-            self.logger.info("✏️ Filling login credentials")
-            self.humanized_wait(1.0, 2.0)
-            
-            # Humanized email input
-            email_input.click()
-            self.humanized_wait(0.5, 1.0)
-            email_input.fill(username)
-            self.take_step_screenshot(page, "email_filled")
-            self.humanized_wait(1.0, 2.0)
-            
-            password_selectors = [
-                'input[type="password"]',
-                'input[name="password"]',
-                '#password'
-            ]
-            
-            password_input = None
-            for selector in password_selectors:
-                if page.locator(selector).is_visible():
-                    password_input = page.locator(selector)
-                    break
-            
-            if not password_input:
-                self.logger.error("❌ Could not find password input field")
-                raise Exception("Password input field not found")
-            
-            # Humanized password input
-            password_input.click()
-            self.humanized_wait(0.5, 1.0)
-            password_input.fill(password)
-            self.take_step_screenshot(page, "password_filled")
-            self.humanized_wait(1.0, 2.0)
-            
-            
-            # Submit login form - try different approaches
+            # Find and click submit button
             submit_button = None
-            
-            # First try: Look for submit button by type
             submit_selectors = [
                 'button[type="submit"]',
-                'input[type="submit"]'
+                'input[type="submit"]',
+                'button:has-text("Log in"):not(:has-text("Google")):not(:has-text("Apple"))',
+                'button:has-text("Sign in"):not(:has-text("Google")):not(:has-text("Apple"))',
+                'button:has-text("Continue"):not(:has-text("Google")):not(:has-text("Apple"))',
+                'form button:not(:has-text("Google")):not(:has-text("Apple"))',
+                '[role="button"]:not(:has-text("Google")):not(:has-text("Apple"))'
             ]
             
             for selector in submit_selectors:
@@ -401,80 +678,54 @@ class CloudflareCookieFetcher:
                     locator = page.locator(selector)
                     if locator.count() > 0 and locator.first.is_visible() and not locator.first.is_disabled():
                         submit_button = locator.first
-                        self.logger.info(f"Found submit button: {selector}")
+                        self.logger.info(f"✅ Found submit button: {selector}")
                         break
                 except:
                     continue
-            
-            # Second try: Look for specific login buttons
-            if not submit_button:
-                login_button_selectors = [
-                    'button:has-text("Log in"):not(:has-text("Google")):not(:has-text("Apple"))',
-                    'button:has-text("Sign in"):not(:has-text("Google")):not(:has-text("Apple"))',
-                    'button:has-text("Continue"):not(:has-text("Google")):not(:has-text("Apple"))'
-                ]
-                
-                for selector in login_button_selectors:
-                    try:
-                        locator = page.locator(selector)
-                        if locator.count() > 0 and locator.first.is_visible() and not locator.first.is_disabled():
-                            submit_button = locator.first
-                            self.logger.info(f"Found login button: {selector}")
-                            break
-                    except:
-                        continue
-            
-            # Third try: Look for any button in form context
-            if not submit_button:
-                form_button_selectors = [
-                    'form button:not(:has-text("Google")):not(:has-text("Apple"))',
-                    'form input[type="submit"]',
-                    '[role="button"]:not(:has-text("Google")):not(:has-text("Apple"))'
-                ]
-                
-                for selector in form_button_selectors:
-                    try:
-                        locator = page.locator(selector)
-                        if locator.count() > 0 and locator.first.is_visible() and not locator.first.is_disabled():
-                            submit_button = locator.first
-                            self.logger.info(f"Found form button: {selector}")
-                            break
-                    except:
-                        continue
             
             if not submit_button:
                 self.logger.error("❌ Could not find enabled submit button")
                 self.take_step_screenshot(page, "submit_button_not_found")
                 raise Exception("Submit button not found or disabled")
             
+            # Human-like submit button interaction
             self.logger.info("🚀 Submitting login form")
-            self.take_step_screenshot(page, "before_submit_click")
+            self.take_step_screenshot(page, "before_submit")
             
-            # Humanized submit button click
+            # Get submit button position for human-like click
+            submit_bbox = submit_button.bounding_box()
+            if submit_bbox:
+                import random
+                submit_x = submit_bbox['x'] + submit_bbox['width'] / 2 + random.uniform(-5, 5)
+                submit_y = submit_bbox['y'] + submit_bbox['height'] / 2 + random.uniform(-2, 2)
+                self.simulate_human_mouse_movement(page, submit_x, submit_y)
+            
+            # Humanized submit sequence
             submit_button.hover()
             self.humanized_wait(0.5, 1.0)
+            submit_button.focus()
+            self.humanized_wait(0.2, 0.5)
             submit_button.click()
             
-            # Take screenshot immediately after click
             self.take_step_screenshot(page, "after_submit_click")
             
-            # Wait for login to complete with longer timeout
-            self.logger.info("⏳ Waiting for login to complete...")
-            page.wait_for_load_state("networkidle", timeout=self.timeout)
-            self.humanized_wait(3.0, 5.0)  # Additional wait for page to fully load
-            
-            self.take_step_screenshot(page, "after_login_attempt")
-            
-            # Verify login success with enhanced checks
-            self.logger.info("🔍 Verifying login success...")
-            
-            # Take screenshot for verification analysis
-            self.take_step_screenshot(page, "login_verification_check")
-            
-            # Wait for page to load after login
+            # Wait for login to process
+            self.logger.info("⏳ Waiting for login to process...")
             self.humanized_wait(3.0, 5.0)
             
-            # Multiple success indicators
+            # Handle any post-login challenges
+            self.logger.info("🔍 Checking for post-login challenges")
+            self.handle_cloudflare_challenge(page)
+            
+            # Wait for page to load after login
+            page.wait_for_load_state("networkidle", timeout=self.timeout)
+            self.humanized_wait(2.0, 4.0)
+            
+            # Verify login success
+            self.logger.info("🔍 Verifying login success...")
+            self.take_step_screenshot(page, "login_verification")
+            
+            # Check for success indicators
             success_selectors = [
                 '[data-testid="user-menu-button"]',
                 '[data-testid="user-dropdown"]',
@@ -484,14 +735,10 @@ class CloudflareCookieFetcher:
                 'button[aria-label*="user"]',
                 'div[data-testid*="user"]',
                 'nav[data-testid*="user"]',
-                # Dashboard indicators
-                'h1:has-text("Cloudflare")',
                 '[data-testid="dashboard"]',
                 '.dashboard',
-                'main[role="main"]',  # Main content area
-                '[data-testid="zone-list"]',  # Domain list
-                # URL-based check
-                'body'  # We'll check URL separately
+                'main[role="main"]',
+                '[data-testid="zone-list"]'
             ]
             
             login_success = False
@@ -521,21 +768,18 @@ class CloudflareCookieFetcher:
                 self.logger.warning("⚠️ Still on login page - login may have failed")
                 login_success = False
             
-            # Take final verification screenshot
-            self.take_step_screenshot(page, "login_verification_result")
-            
             if login_success:
-                self.logger.info(f"✅ Successfully logged in to Cloudflare (indicator: {found_indicator or 'URL pattern'})")
-                self.take_step_screenshot(page, "login_success_confirmed")
+                self.logger.info(f"✅ Automated login successful! (indicator: {found_indicator or 'URL pattern'})")
+                self.take_step_screenshot(page, "login_success")
             else:
-                self.logger.error(f"❌ Login verification failed - Current URL: {current_url}")
+                self.logger.error(f"❌ Automated login failed - Current URL: {current_url}")
                 self.take_step_screenshot(page, "login_failed")
-                # STOP here instead of continuing - don't extract cookies without proper login
                 raise Exception(f"Login failed - still on login page: {current_url}")
-                
+            
         except Exception as e:
-            self.logger.error(f"Login failed: {str(e)}")
+            self.logger.error(f"❌ Automated login failed: {str(e)}")
             raise
+    
     
     def extract_cookies(self, page: Page) -> List[Dict]:
         """Extract cookies from the current page."""
@@ -659,40 +903,15 @@ class CloudflareCookieFetcher:
                 already_logged_in = self.check_login_status(page)
                 
                 if not already_logged_in:
-                    self.logger.info("🔐 Login required - starting authentication process")
+                    self.logger.info("🔐 Login required - starting automated authentication process")
                     
                     # Handle Cloudflare challenge
                     self.handle_cloudflare_challenge(page)
                     
-                    # Step 3: Fill credentials if provided
+                    # Step 3: Perform automated login
                     if self.username and self.password:
-                        self.logger.info("✏️ Filling login credentials for manual submission")
-                        self.fill_login_credentials(page, self.username, self.password)
-                        
-                        # Wait for manual login
-                        self.logger.info("⏳ Please manually click the login button and complete authentication")
-                        self.logger.info("📝 The script will wait for you to complete login...")
-                        
-                        # Wait for login completion (up to 5 minutes)
-                        login_timeout = 300  # 5 minutes
-                        login_completed = False
-                        
-                        for i in range(login_timeout):
-                            self.humanized_wait(1.0, 1.0)  # Check every second
-                            
-                            if self.check_login_status(page):
-                                self.logger.info("✅ Manual login completed successfully!")
-                                login_completed = True
-                                break
-                            
-                            # Log progress every 30 seconds
-                            if i % 30 == 0 and i > 0:
-                                self.logger.info(f"⏳ Still waiting for login... ({i}/{login_timeout}s)")
-                        
-                        if not login_completed:
-                            self.logger.error("❌ Login timeout - please try again")
-                            raise Exception("Manual login timeout")
-                            
+                        self.logger.info("🤖 Starting fully automated login")
+                        self.perform_automatic_login(page, self.username, self.password)
                     else:
                         self.logger.error("❌ No credentials provided in .env file")
                         raise Exception("Login credentials required but not provided")
